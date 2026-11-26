@@ -58,6 +58,12 @@ def post_time(c):
     return (int(m.group(1)), int(m.group(2))) if m else (8, 0)
 
 
+def plays_too(c) -> set:
+    """Staff who also play: Discord user IDs listed in the sheet (Bot settings)."""
+    raw = c.settings.get("staff who also play", "")
+    return {int(x) for x in re.findall(r"\d{15,}", raw)}
+
+
 def is_staff(member) -> bool:
     if member is None:
         return False
@@ -232,7 +238,7 @@ async def handle_press(interaction, cid):
         return await interaction.followup.send("This claim has lapsed. Ask for a new one with /stamp.", ephemeral=True)
     if store.has_stamp(user.id, claim["key"], claim["year"]):
         return await interaction.followup.send("You already hold this Stamp.", ephemeral=True)
-    counts = not is_staff(user)
+    counts = (not is_staff(user)) or user.id in plays_too(sheet.get())
     store.add_press(cid, user.id, counts)
     guild = interaction.guild
     if claim["passed"]:
