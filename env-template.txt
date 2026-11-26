@@ -1,0 +1,10 @@
+# These are the settings to add on Railway (Variables tab). Never share the token.
+DISCORD_TOKEN=paste-the-bot-token-here
+GUILD_ID=1544432721575542807
+CALENDAR_CHANNEL_ID=
+CHRONICLE_CHANNEL_ID=1575389092693414009
+SCENES_CHANNEL_ID=
+STAFF_ROLE_ID=
+SHEET_ID=1wMPVK1JcGI1E334oyJPFc_uku3ib6Pte0HmOMbN8SxQ
+DB_PATH=/data/stamps.db
+BACKUP_DIR=/data/backups
