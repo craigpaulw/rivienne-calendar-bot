@@ -15,6 +15,12 @@ VOTE_DELAY_DAYS = 7    # vote opens a week after the window closes
 VOTE_DAYS = 7
 LINE_DAYS = 7          # players get a week to write the Chronicle line
 
+JOB_RANK2 = 8          # witnessed Job scenes for the second rank
+JOB_RANK3 = 32         # witnessed Job scenes for Master
+
+BIOMES = ["Woods", "Marsh", "Hill", "Beach", "Glacier", "Tropics",
+          "Mountain", "Volcano", "Desert", "City"]
+
 
 @dataclass
 class Custom:
@@ -119,6 +125,30 @@ def next_rung(total: int, ladder):
 def claim_passes(presses, claimant: int) -> bool:
     """presses = [(user_id, counts_toward_pass)]. Needs one other counted player."""
     return any(uid != claimant and counts for uid, counts in presses)
+
+
+def job_rank(scenes: int) -> int:
+    """Which rank a count of witnessed Job scenes has reached: 1, 2 or 3."""
+    if scenes >= JOB_RANK3:
+        return 3
+    if scenes >= JOB_RANK2:
+        return 2
+    return 1
+
+
+def job_next(scenes: int):
+    """(scenes still needed, the rank it brings), or None at Master."""
+    if scenes < JOB_RANK2:
+        return JOB_RANK2 - scenes, 2
+    if scenes < JOB_RANK3:
+        return JOB_RANK3 - scenes, 3
+    return None
+
+
+def week_key(d: date) -> str:
+    """The real-world week a date falls in, Monday to Sunday. '2026-W48'."""
+    y, w, _ = d.isocalendar()
+    return f"{y}-W{w:02d}"
 
 
 def custom_bynames(dated: set, standing_stamped: set, standing_all: set, rules):

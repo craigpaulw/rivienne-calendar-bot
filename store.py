@@ -32,6 +32,16 @@ CREATE TABLE IF NOT EXISTS entries(
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS resets(
   user_id INTEGER, by_user INTEGER, stamps INTEGER, at TEXT);
+CREATE TABLE IF NOT EXISTS job_choice(
+  user_id INTEGER PRIMARY KEY, job TEXT, biome TEXT, chosen_at TEXT);
+CREATE TABLE IF NOT EXISTS job_scenes(
+  user_id INTEGER, job TEXT, partner_id INTEGER, week TEXT, thread_id INTEGER, at TEXT,
+  PRIMARY KEY(user_id, job, partner_id, week));
+CREATE TABLE IF NOT EXISTS job_claims(
+  id INTEGER PRIMARY KEY, message_id INTEGER, thread_id INTEGER, claimant INTEGER,
+  job TEXT, created_at TEXT, passed INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS job_presses(
+  claim_id INTEGER, user_id INTEGER, counts INTEGER, PRIMARY KEY(claim_id, user_id));
 """
 
 
@@ -194,6 +204,85 @@ class Store:
     def bynames(self, user):
         return [r["byname"] for r in self.db.execute("SELECT byname FROM bynames WHERE user_id=? ORDER BY awarded_at", (user,))]
 
+    # ---------- Jobs ----------
+
+    def set_job(self, user, job, biome=""):
+        self.db.execute("INSERT OR REPLACE INTO job_choice(user_id,job,biome,chosen_at) VALUES(?,?,?,?)",
+                        (user, job, biome or "", now_iso()))
+        self.db.commit()
+
+    def job_choice(self, user):
+        return self.db.execute("SELECT * FROM job_choice WHERE user_id=?", (user,)).fetchone()
+
+    def clear_job(self, user):
+        self.db.execute("DELETE FROM job_choice WHERE user_id=?", (user,))
+        self.db.commit()
+
+    def job_scene_count(self, user, job, per_scene=True):
+        """Witnessed Job scenes in this Job. per_scene counts distinct scenes; otherwise
+        it counts partner-weeks, so one scene with three witnesses counts three."""
+        q = ("SELECT COUNT(DISTINCT thread_id) c FROM job_scenes WHERE user_id=? AND job=?"
+             if per_scene else
+             "SELECT COUNT(*) c FROM job_scenes WHERE user_id=? AND job=?")
+        return self.db.execute(q, (user, job)).fetchone()["c"]
+
+    def add_job_scene(self, user, job, partner, week, thread_id):
+        """True if this partner-week was free, False if the pair already counted that week."""
+        try:
+            self.db.execute(
+                "INSERT INTO job_scenes(user_id,job,partner_id,week,thread_id,at) VALUES(?,?,?,?,?,?)",
+                (user, job, partner, week, thread_id, now_iso()))
+            self.db.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def job_history(self, user):
+        """Every Job this Trainer has scenes in, so progress in a Job they left is kept."""
+        return self.db.execute(
+            "SELECT job, COUNT(DISTINCT thread_id) scenes, COUNT(*) pairs "
+            "FROM job_scenes WHERE user_id=? GROUP BY job ORDER BY job", (user,)).fetchall()
+
+    def new_job_claim(self, thread_id, claimant, job):
+        cur = self.db.execute(
+            "INSERT INTO job_claims(thread_id,claimant,job,created_at) VALUES(?,?,?,?)",
+            (thread_id, claimant, job, now_iso()))
+        self.db.commit()
+        return cur.lastrowid
+
+    def job_claim(self, cid):
+        return self.db.execute("SELECT * FROM job_claims WHERE id=?", (cid,)).fetchone()
+
+    def set_job_claim_message(self, cid, mid):
+        self.db.execute("UPDATE job_claims SET message_id=? WHERE id=?", (mid, cid))
+        self.db.commit()
+
+    def open_job_claim(self, thread_id, claimant, job, max_age_days):
+        cutoff = datetime.now(timezone.utc).timestamp() - max_age_days * 86400
+        for r in self.db.execute(
+                "SELECT * FROM job_claims WHERE thread_id=? AND claimant=? AND job=? AND passed=0",
+                (thread_id, claimant, job)):
+            if datetime.fromisoformat(r["created_at"]).timestamp() >= cutoff:
+                return r
+        return None
+
+    def mark_job_passed(self, cid):
+        self.db.execute("UPDATE job_claims SET passed=1 WHERE id=?", (cid,))
+        self.db.commit()
+
+    def add_job_press(self, cid, user, counts):
+        try:
+            self.db.execute("INSERT INTO job_presses(claim_id,user_id,counts) VALUES(?,?,?)",
+                            (cid, user, 1 if counts else 0))
+            self.db.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def job_presses(self, cid):
+        return [(r["user_id"], bool(r["counts"])) for r in
+                self.db.execute("SELECT user_id,counts FROM job_presses WHERE claim_id=?", (cid,))]
+
     # reset a retired Trainer
     def reset_user(self, user, by):
         n = self.count(user)
@@ -204,6 +293,11 @@ class Store:
         d.execute("DELETE FROM scene_players WHERE user_id=?", (user,))
         d.execute("DELETE FROM claims WHERE claimant=? AND passed=0", (user,))
         d.execute("DELETE FROM meta WHERE k=?", (f"rung:{user}",))
+        d.execute("DELETE FROM job_choice WHERE user_id=?", (user,))
+        d.execute("DELETE FROM job_scenes WHERE user_id=?", (user,))
+        d.execute("DELETE FROM job_presses WHERE user_id=?", (user,))
+        d.execute("DELETE FROM job_claims WHERE claimant=? AND passed=0", (user,))
+        d.execute("DELETE FROM meta WHERE k LIKE ?", (f"jobrank:{user}:%",))
         d.execute("INSERT INTO resets VALUES(?,?,?,?)", (user, by, n, now_iso()))
         d.commit()
         return n

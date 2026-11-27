@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import tasks
 from dotenv import load_dotenv
 
+import jobs
 import logic
 from content import Sheet
 from store import Store
@@ -33,6 +34,7 @@ STAFF_ROLE = env_int("STAFF_ROLE_ID")
 GUILD = discord.Object(id=GUILD_ID) if GUILD_ID else None
 
 sheet = Sheet(os.getenv("SHEET_ID", ""))
+jobsheet = jobs.Jobs(os.getenv("CHARACTER_SHEET_ID", ""))
 store = Store(os.getenv("DB_PATH", "stamps.db"))
 
 intents = discord.Intents.default()
@@ -62,6 +64,12 @@ def plays_too(c) -> set:
     """Staff who also play: Discord user IDs listed in the sheet (Bot settings)."""
     raw = c.settings.get("staff who also play", "")
     return {int(x) for x in re.findall(r"\d{15,}", raw)}
+
+
+def per_scene(c) -> bool:
+    """How a witnessed Job scene is credited. Set 'Job scene credit' in Bot settings to
+    'per partner' if one scene with three witnesses should count three."""
+    return "partner" not in c.settings.get("job scene credit", "per scene").lower()
 
 
 def is_staff(member) -> bool:
@@ -323,6 +331,247 @@ async def passport_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=emb, ephemeral=True)
 
 
+# ---------- Jobs ----------
+
+def where_text(j, biome):
+    if j.picks_biome:
+        return f"{biome} (the biome you chose)" if biome else j.where
+    return j.where
+
+
+def job_embed(member, j, biome, scenes, c):
+    rank = logic.job_rank(scenes)
+    nxt = logic.job_next(scenes)
+    emb = discord.Embed(title=f"{j.name} - {j.title(rank)}",
+                        description=j.remit, colour=0x7B3FE4)
+    emb.add_field(name="Where your Remit applies", value=where_text(j, biome), inline=False)
+    emb.add_field(name="Rank", value=f"{rank} of 3")
+    emb.add_field(name="Witnessed Job scenes", value=str(scenes))
+    emb.add_field(name="Next rank",
+                  value=f"{nxt[0]} more for rank {nxt[1]}, **{j.title(nxt[1])}**" if nxt else "You are a Master")
+    emb.add_field(name=f"Master effect - {j.master}" + ("" if rank >= 3 else " (locked until rank 3)"),
+                  value=j.effect, inline=False)
+    others = [r for r in store.job_history(member.id) if r["job"] != j.name]
+    if others:
+        kept = ", ".join(f"{r['job']} ({r['scenes' if per_scene(c) else 'pairs']})" for r in others)
+        emb.add_field(name="Kept progress in other Jobs", value=kept, inline=False)
+    emb.set_footer(text=f"{member.display_name} · /jobscene in a scene thread to claim a scene")
+    return emb
+
+
+async def job_autocomplete(interaction: discord.Interaction, current: str):
+    try:
+        names = jobsheet.get().names()
+    except Exception:
+        return []
+    cur = current.lower()
+    return [app_commands.Choice(name=n, value=n) for n in names if cur in n.lower()][:25]
+
+
+async def biome_autocomplete(interaction: discord.Interaction, current: str):
+    cur = current.lower()
+    return [app_commands.Choice(name=b, value=b) for b in logic.BIOMES if cur in b.lower()][:25]
+
+
+@tree.command(name="job", description="Pick your Job, or see the one you have", guild=GUILD)
+@app_commands.describe(job="Leave this empty to see the Job you already have",
+                       biome="Only for a Job whose Remit applies in one biome of your choice")
+@app_commands.autocomplete(job=job_autocomplete, biome=biome_autocomplete)
+async def job_cmd(interaction: discord.Interaction, job: str = None, biome: str = None):
+    c = sheet.get()
+    try:
+        data = jobsheet.get()
+    except Exception:
+        log.exception("could not read the Jobs")
+        return await interaction.response.send_message(
+            "I can't read the Job list from the Character Sheet right now. Try again in a few minutes.",
+            ephemeral=True)
+    row = store.job_choice(interaction.user.id)
+
+    if job is None:
+        if not row:
+            return await interaction.response.send_message(
+                "You have no Job yet. Run `/job` again and pick one from the list. "
+                "You can change it between Contests as often as you like, and progress in a Job "
+                "you leave is kept.", ephemeral=True)
+        j = data.job(row["job"])
+        if not j:
+            return await interaction.response.send_message(
+                f"Your Job is recorded as **{row['job']}**, which is no longer in the game data. "
+                "Pick a Job again with `/job`.", ephemeral=True)
+        scenes = store.job_scene_count(interaction.user.id, j.name, per_scene(c))
+        return await interaction.response.send_message(
+            embed=job_embed(interaction.user, j, row["biome"], scenes, c), ephemeral=True)
+
+    j = data.job(job)
+    if not j:
+        return await interaction.response.send_message(
+            f"There is no Job called **{job}**. Pick one from the list.", ephemeral=True)
+    if j.picks_biome and not biome:
+        return await interaction.response.send_message(
+            f"**{j.name}**'s Remit applies in one biome of your choice, so run it again with the "
+            f"biome as well: `/job job:{j.name} biome:Woods`. The biomes are "
+            + ", ".join(logic.BIOMES) + ".", ephemeral=True)
+    if biome and not j.picks_biome:
+        biome = ""
+    if biome and biome not in logic.BIOMES:
+        return await interaction.response.send_message(
+            f"**{biome}** is not a biome. Pick one of " + ", ".join(logic.BIOMES) + ".", ephemeral=True)
+
+    was = row["job"] if row else None
+    store.set_job(interaction.user.id, j.name, biome or "")
+    scenes = store.job_scene_count(interaction.user.id, j.name, per_scene(c))
+    note = ""
+    if was and was != j.name:
+        note = f"You left **{was}**, and its scenes are kept for if you go back to it.\n"
+    elif was == j.name:
+        note = "That was already your Job.\n"
+    await interaction.response.send_message(
+        note + f"Your Job is **{j.name}**.",
+        embed=job_embed(interaction.user, j, biome or "", scenes, c), ephemeral=True)
+
+
+class JobPressButton(discord.ui.DynamicItem[discord.ui.Button], template=r"jobwas:(?P<cid>\d+)"):
+    def __init__(self, cid: int):
+        super().__init__(discord.ui.Button(label="I was there", style=discord.ButtonStyle.success,
+                                           custom_id=f"jobwas:{cid}"))
+        self.cid = cid
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["cid"]))
+
+    async def callback(self, interaction: discord.Interaction):
+        await handle_job_press(interaction, self.cid)
+
+
+async def announce_job_rank(guild, user_id, j, rank):
+    """Says so in the calendar channel the first time a Trainer reaches rank 2 or Master."""
+    key = f"jobrank:{user_id}:{j.name}"
+    prev = int(store.get(key) or 1)
+    if rank <= prev:
+        return
+    store.put(key, str(rank))
+    if rank >= 2 and CALENDAR_CHANNEL:
+        what = f"a **{j.title(rank)}**" if rank == 2 else f"the **{j.title(rank)}**, a Master of the Job"
+        await say(CALENDAR_CHANNEL, content=f"<@{user_id}> is now {what} ({j.name}).")
+
+
+@tree.command(name="jobscene", description="Claim a witnessed Job scene for the scene in this thread",
+              guild=GUILD)
+@app_commands.describe(job="Which Job the scene was. Leave empty if you have already picked one")
+@app_commands.autocomplete(job=job_autocomplete)
+async def jobscene_cmd(interaction: discord.Interaction, job: str = None):
+    ch = interaction.channel
+    if not in_scenes(ch):
+        return await interaction.response.send_message(
+            "Use /jobscene inside a scene thread in the Scenes channel.", ephemeral=True)
+    try:
+        data = jobsheet.get()
+    except Exception:
+        return await interaction.response.send_message(
+            "I can't read the Job list from the Character Sheet right now. Try again in a few minutes.",
+            ephemeral=True)
+    row = store.job_choice(interaction.user.id)
+    note = ""
+
+    if job:
+        j = data.job(job)
+        if not j:
+            return await interaction.response.send_message(
+                f"There is no Job called **{job}**. Pick one from the list as you type.", ephemeral=True)
+        if row and row["job"].lower() != j.name.lower():
+            return await interaction.response.send_message(
+                f"Your Job is **{row['job']}**, so that is the Job your scenes count towards. "
+                f"If you have moved to **{j.name}**, change it with `/job job:{j.name}` first - "
+                f"your {row['job']} scenes are kept either way.", ephemeral=True)
+        if not row:
+            store.set_job(interaction.user.id, j.name, "")
+            note = f"Your Job is now **{j.name}**.\n"
+            if j.picks_biome:
+                note += (f"**{j.name}**'s Remit applies in one biome of your choice - set it with "
+                         f"`/job job:{j.name} biome:Woods` when you get a moment.\n")
+    else:
+        if not row:
+            return await interaction.response.send_message(
+                "Which Job was the scene? Run `/jobscene` again and pick one in the **job** option, "
+                "or pick your Job first with `/job`. You can change it between Contests as often as "
+                "you like, and progress in a Job you leave is kept.", ephemeral=True)
+        j = data.job(row["job"])
+
+    if not j:
+        return await interaction.response.send_message(
+            f"Your Job is recorded as **{row['job']}**, which is no longer in the game data. "
+            "Pick a Job again with `/job`.", ephemeral=True)
+    if store.open_job_claim(ch.id, interaction.user.id, j.name, logic.PRESS_DAYS):
+        return await interaction.response.send_message(
+            "You already have an open Job scene claim in this thread.", ephemeral=True)
+    cid = store.new_job_claim(ch.id, interaction.user.id, j.name)
+    store.add_job_press(cid, interaction.user.id, True)
+    view = discord.ui.View(timeout=None)
+    view.add_item(JobPressButton(cid))
+    await interaction.response.send_message(
+        note +
+        f"{interaction.user.mention} is claiming a witnessed **{j.name}** Job scene for this scene.\n"
+        f"Another player who was in it, press the button. A Contest Master or NPC does not count. "
+        f"A Job scene counts once a week with any one other player, so a new partner always counts. "
+        f"The claim stays open for {logic.PRESS_DAYS} days.", view=view)
+    msg = await interaction.original_response()
+    store.set_job_claim_message(cid, msg.id)
+
+
+async def handle_job_press(interaction, cid):
+    await interaction.response.defer(ephemeral=True)
+    claim = store.job_claim(cid)
+    if not claim:
+        return await interaction.followup.send("This claim is no longer open.", ephemeral=True)
+    user = interaction.user
+    if user.id == claim["claimant"]:
+        return await interaction.followup.send(
+            "This is your own claim. Another player who was in the scene needs to press.", ephemeral=True)
+    age = datetime.now(timezone.utc) - datetime.fromisoformat(claim["created_at"])
+    if age > timedelta(days=logic.PRESS_DAYS):
+        return await interaction.followup.send(
+            "This claim has lapsed. Ask for a new one with /jobscene.", ephemeral=True)
+    c = sheet.get()
+    counts = (not is_staff(user)) or user.id in plays_too(c)
+    store.add_job_press(cid, user.id, counts)
+    if not counts:
+        return await interaction.followup.send(
+            "Noted, but a Contest Master does not count as the witness. A player who was in the "
+            "scene needs to press too.", ephemeral=True)
+    try:
+        j = jobsheet.get().job(claim["job"])
+    except Exception:
+        j = None
+    week = logic.week_key(now_local(c).date())
+    before = store.job_scene_count(claim["claimant"], claim["job"], per_scene(c))
+    fresh = store.add_job_scene(claim["claimant"], claim["job"], user.id, week, claim["thread_id"])
+    if not fresh:
+        return await interaction.followup.send(
+            f"You and <@{claim['claimant']}> have already counted a **{claim['job']}** Job scene "
+            "together this week. Scene as much as you like; it counts again next week, or now with "
+            "a different player.", ephemeral=True)
+    store.mark_job_passed(cid)
+    after = store.job_scene_count(claim["claimant"], claim["job"], per_scene(c))
+    if j and after > before:
+        await announce_job_rank(interaction.guild, claim["claimant"], j, logic.job_rank(after))
+    if after > before:
+        await interaction.followup.send(
+            f"Witnessed. That is {after} witnessed **{claim['job']}** scenes for "
+            f"<@{claim['claimant']}>.", ephemeral=True)
+    else:
+        await interaction.followup.send(
+            f"Witnessed, and your week with <@{claim['claimant']}> is now used up. This scene was "
+            f"already counted, so the total stays at {after}.", ephemeral=True)
+    names = [f"<@{u}>" for u, k in store.job_presses(cid) if k]
+    try:
+        await interaction.message.edit(
+            content=f"**{claim['job']}** Job scene, witnessed. In the scene: {', '.join(names)}")
+    except discord.HTTPException:
+        pass
+
+
 # ---------- staff commands ----------
 
 def staff_only(interaction):
@@ -397,13 +646,34 @@ async def reset_cmd(interaction: discord.Interaction, player: discord.Member):
 # ---------- the Chronicle: every entry goes through here ----------
 
 ENTRY_MAX = 280
-ENTRY_TYPES = [
-    "Landmark (founders)", "Master Contest win", "Press - Editor", "Artist - Laureate",
-    "Nurse - Physician", "Costumer - Designer", "Chef - Head Cook", "Mystic - Oracle",
-    "Coastguard - Lifesaver", "Ranger - Old Hand", "Researcher - Chair", "Shrinewarden - Elder",
-    "Mountaineer - Pathfinder", "Archaeologist - Old Bones", "Safety Officer - Chief Inspector",
-    "HR Manager - Head of People", "Innkeeper - Host",
+
+# These two are the Chronicle's own, not a Job's.
+FIXED_ENTRY_TYPES = ["Landmark (founders)", "Master Contest win"]
+
+# Only used if the Character Sheet cannot be read at the moment somebody runs /chronicle.
+# The live list comes from the sheet, so this copy is a safety net, not the source of truth.
+FALLBACK_ENTRY_TYPES = [
+    "Press - Editor", "Artist - Laureate", "Nurse - Physician", "Costumer - Designer",
+    "Chef - Head Cook", "Mystic - Oracle", "Coastguard - Lifesaver", "Ranger - Old Hand",
+    "Shrinewarden - Elder", "Mountaineer - Pathfinder", "Archaeologist - Old Bones",
+    "Researcher - Chair", "Safety Officer - Chief Inspector", "HR Manager - Head of People",
+    "Innkeeper - Host",
 ]
+
+
+def entry_types():
+    """The Chronicle's entry kinds. The Job ones are read from the Character Sheet's
+    Chronicle entry column, so renaming a Master title cannot leave this list stale."""
+    try:
+        return FIXED_ENTRY_TYPES + jobsheet.get().chronicle_kinds()
+    except Exception:
+        log.exception("could not read the Jobs for the Chronicle list")
+        return FIXED_ENTRY_TYPES + FALLBACK_ENTRY_TYPES
+
+
+async def entry_type_autocomplete(interaction: discord.Interaction, current: str):
+    cur = current.lower()
+    return [app_commands.Choice(name=n[:100], value=n) for n in entry_types() if cur in n.lower()][:25]
 
 
 async def post_entry(kind, text, author_id, named_ids):
@@ -445,15 +715,23 @@ class ConfirmEntry(discord.ui.View):
 @tree.command(name="chronicle", description="Write an entry in the Chronicle", guild=GUILD)
 @app_commands.describe(kind="What you are recording", entry="Your two lines. Entries are never edited, so read it twice",
                        named1="Someone named in the entry", named2="Another person named", named3="Another person named")
-@app_commands.choices(kind=[app_commands.Choice(name=n, value=n) for n in ENTRY_TYPES])
-async def chronicle_cmd(interaction: discord.Interaction, kind: app_commands.Choice[str],
+@app_commands.autocomplete(kind=entry_type_autocomplete)
+async def chronicle_cmd(interaction: discord.Interaction, kind: str,
                         entry: app_commands.Range[str, 10, ENTRY_MAX],
                         named1: discord.Member = None, named2: discord.Member = None, named3: discord.Member = None):
+    # The list is suggested, not enforced, by Discord, so check it here. An entry can never be
+    # edited or removed, so a mistyped kind would be permanent.
+    allowed = entry_types()
+    kind = next((k for k in allowed if k.lower() == kind.strip().lower()), None)
+    if kind is None:
+        return await interaction.response.send_message(
+            "That is not one of the Chronicle's entry kinds. Pick one from the list as you type:\n"
+            + "\n".join(f"- {k}" for k in allowed), ephemeral=True)
     named = [m.id for m in (named1, named2, named3) if m and not m.bot]
-    preview = f"**{kind.value}**\n{entry}\n\n" + (f"Named: {' '.join(f'<@{n}>' for n in named)}\n\n" if named else "")
+    preview = f"**{kind}**\n{entry}\n\n" + (f"Named: {' '.join(f'<@{n}>' for n in named)}\n\n" if named else "")
     await interaction.response.send_message(
         preview + "This goes into the Chronicle for good. It can't be edited or removed afterwards.",
-        view=ConfirmEntry(interaction.user.id, kind.value, entry, named), ephemeral=True,
+        view=ConfirmEntry(interaction.user.id, kind, entry, named), ephemeral=True,
         allowed_mentions=discord.AllowedMentions.none())
 
 
@@ -566,7 +844,7 @@ async def before_tick():
 
 @bot.event
 async def setup_hook():
-    bot.add_dynamic_items(PressButton)
+    bot.add_dynamic_items(PressButton, JobPressButton)
     if GUILD:
         await tree.sync(guild=GUILD)
     tick.start()
