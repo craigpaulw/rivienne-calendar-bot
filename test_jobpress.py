@@ -306,6 +306,93 @@ def test_jobscene_innkeeper_mentions_the_biome():
     assert s.job_choice(CRAIG)["job"] == "Innkeeper"
 
 
+# ---------- /job picking a Job ----------
+
+def run_job(user, job=None, biome=None):
+    i = Interaction(user)
+    asyncio.run(bot.job_cmd.callback(i, job=job, biome=biome))
+    return i
+
+
+def test_job_innkeeper_is_not_blocked_on_the_biome():
+    """Both commands behave the same: set the Job, nudge about the biome, never refuse."""
+    s = setup()
+    s.clear_job(CRAIG)
+    i = run_job(User(CRAIG), job="Innkeeper")
+    assert s.job_choice(CRAIG)["job"] == "Innkeeper"
+    assert "one biome of your choice" in i.said()
+    assert "Your Job is **Innkeeper**" in i.said()
+
+
+def test_job_rerun_keeps_the_biome():
+    s = setup()
+    s.clear_job(CRAIG)
+    run_job(User(CRAIG), job="Innkeeper", biome="Marsh")
+    assert s.job_choice(CRAIG)["biome"] == "Marsh"
+    run_job(User(CRAIG), job="Innkeeper")            # no biome given
+    assert s.job_choice(CRAIG)["biome"] == "Marsh", "re-running wiped the biome"
+
+
+def test_job_changing_job_clears_a_stale_biome():
+    s = setup()
+    s.clear_job(CRAIG)
+    run_job(User(CRAIG), job="Innkeeper", biome="Marsh")
+    run_job(User(CRAIG), job="Press")
+    assert s.job_choice(CRAIG)["biome"] == ""
+
+
+def test_job_rejects_a_biome_that_is_not_one():
+    s = setup()
+    s.clear_job(CRAIG)
+    i = run_job(User(CRAIG), job="Innkeeper", biome="Atlantis")
+    assert "is not a biome" in i.said()
+    assert s.job_choice(CRAIG) is None
+
+
+# ---------- the /job card ----------
+
+def card(job_name, biome=""):
+    setup()
+    j = bot.jobsheet.get().job(job_name)
+    return bot.job_embed(User(CRAIG), j, biome, 0, bot.sheet.get())
+
+
+def fields(emb):
+    return {f.name: f.value for f in emb.fields}
+
+
+def test_anywhere_jobs_show_no_where_line():
+    f = fields(card("Press"))
+    assert not any("Where" in k for k in f), f
+    assert "Rank" in f and "Witnessed Job scenes" in f
+
+
+def test_rooted_jobs_show_named_places():
+    f = fields(card("Shrinewarden"))
+    where = next(v for k, v in f.items() if "Where" in k)
+    assert "Stormbrow (Hill)" in where and "Cindermere (Volcano)" in where, where
+
+
+def test_anywhere_but_city_is_printed_as_the_handbook_does():
+    f = fields(card("Ranger"))
+    where = next(v for k, v in f.items() if "Where" in k)
+    assert where == "Anywhere but City", where
+
+
+def test_innkeeper_card_reads_cleanly():
+    f = fields(card("Innkeeper", biome="Marsh"))
+    where = next(v for k, v in f.items() if "Where" in k)
+    assert where == "Sinkfield (Marsh), the biome you chose", where
+    # and with no biome set it falls back to what the sheet says
+    f2 = fields(card("Innkeeper"))
+    assert next(v for k, v in f2.items() if "Where" in k) == "One biome of your choice"
+
+
+def test_master_effect_is_marked_locked_at_rank_one():
+    emb = card("Press")
+    assert any("locked until rank 3" in f.name for f in emb.fields), fields(emb)
+
+
 # ---------- the Chronicle's list now comes off the sheet ----------
 
 def test_entry_types_come_from_the_sheet():

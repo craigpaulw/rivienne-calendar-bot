@@ -21,6 +21,15 @@ JOB_RANK3 = 32         # witnessed Job scenes for Master
 BIOMES = ["Woods", "Marsh", "Hill", "Beach", "Glacier", "Tropics",
           "Mountain", "Volcano", "Desert", "City"]
 
+# The island's named places, one per biome. From All about Rivienne, which calls a sub-region
+# "a named place built on a biome". Biome stays the stored fact; this is only for display.
+SUBREGION = {
+    "Woods": "Longfall", "Marsh": "Sinkfield", "Hill": "Stormbrow",
+    "Beach": "Saltreach", "Glacier": "Cryonne", "Tropics": "Pualani",
+    "Mountain": "Hollowcrown Peaks", "Volcano": "Cindermere",
+    "Desert": "Chichenote", "City": "Aurelle",
+}
+
 
 @dataclass
 class Custom:
@@ -143,6 +152,20 @@ def job_next(scenes: int):
     if scenes < JOB_RANK3:
         return JOB_RANK3 - scenes, 3
     return None
+
+
+def where_label(where: str) -> str:
+    """'Beach, Glacier' -> 'Saltreach (Beach), Cryonne (Glacier)'.
+
+    Only a plain list of biomes is expanded. 'Anywhere', 'Anywhere but City' and 'One biome of
+    your choice' come back exactly as the Player Handbook prints them, because matching the
+    master document matters more than decorating it.
+    """
+    where = (where or "").strip()
+    parts = [p.strip() for p in where.split(",")]
+    if parts and all(p in SUBREGION for p in parts):
+        return ", ".join(f"{SUBREGION[p]} ({p})" for p in parts)
+    return where
 
 
 def week_key(d: date) -> str:

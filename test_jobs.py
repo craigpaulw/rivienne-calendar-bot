@@ -27,7 +27,7 @@ ROWS = [
     ["Skywatcher", "Anywhere", "Watch", "Weatherwise", "Stormcaller", "e", "r", "No"],
     ["Coastguard", "Beach, Glacier, Tropics, Marsh", "Crew", "Coxswain", "Lifesaver", "e", "r", "Yes"],
     ["Ranger", "Anywhere but City", "Apprentice", "Tracker", "Old Hand", "e", "r", "Yes"],
-    ["Shrinewarden", "Anywhere but City", "Novice", "Tender", "Elder", "e", "r", "Yes"],
+    ["Shrinewarden", "Hill, Beach, Glacier, Volcano, Desert", "Novice", "Tender", "Elder", "e", "r", "Yes"],
     ["Mountaineer", "Hill, Glacier, Mountain, Volcano", "Porter", "Guide", "Pathfinder", "e", "r", "Yes"],
     ["Archaeologist", "Woods, Hill, Mountain, Volcano, Desert", "Sifter", "Digger", "Old Bones", "e", "r", "Yes"],
     ["Researcher", "Anywhere", "Assistant", "Fellow", "Chair", "e", "r", "Yes"],
@@ -99,6 +99,45 @@ def test_missing_header_is_loud():
         assert "header" in str(e).lower()
     else:
         raise AssertionError("a missing header should raise, not return an empty list")
+
+
+def test_shrinewarden_sits_where_the_shrines_are():
+    """Four shrines, in five biomes: Thunder at Stormbrow, Ice at Cryonne,
+    Sea at Saltreach and Chichenote, Fire at Cindermere."""
+    d = jobs.parse(via_csv(ROWS))
+    where = d.job("Shrinewarden").where
+    assert set(p.strip() for p in where.split(",")) == {
+        "Hill", "Beach", "Glacier", "Volcano", "Desert"}
+    assert "Anywhere" not in where
+    # the Ranger keeps its own broader Where
+    assert d.job("Ranger").where == "Anywhere but City"
+
+
+def test_where_label():
+    # a plain biome list is expanded to its named places
+    assert logic.where_label("Beach") == "Saltreach (Beach)"
+    assert logic.where_label("Hill, Beach, Glacier, Volcano, Desert") == (
+        "Stormbrow (Hill), Saltreach (Beach), Cryonne (Glacier), "
+        "Cindermere (Volcano), Chichenote (Desert)")
+    # anything the Handbook phrases as prose is left exactly as printed
+    for as_printed in ("Anywhere", "Anywhere but City", "One biome of your choice"):
+        assert logic.where_label(as_printed) == as_printed
+    assert logic.where_label("") == ""
+    # every biome has a named place, and no two share one
+    assert set(logic.SUBREGION) == set(logic.BIOMES)
+    assert len(set(logic.SUBREGION.values())) == 10
+
+
+def test_every_where_renders():
+    """No Job's Where comes out blank or half-translated."""
+    d = jobs.parse(via_csv(ROWS))
+    for j in d.jobs:
+        out = logic.where_label(j.where)
+        assert out and out.strip(), j.name
+        parts = [p.strip() for p in j.where.split(",")]
+        if all(p in logic.BIOMES for p in parts):
+            for p in parts:
+                assert logic.SUBREGION[p] in out, (j.name, p)
 
 
 def test_chronicle_kinds():

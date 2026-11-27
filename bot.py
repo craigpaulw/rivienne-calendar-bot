@@ -335,8 +335,8 @@ async def passport_cmd(interaction: discord.Interaction):
 
 def where_text(j, biome):
     if j.picks_biome:
-        return f"{biome} (the biome you chose)" if biome else j.where
-    return j.where
+        return f"{logic.where_label(biome)}, the biome you chose" if biome else j.where
+    return logic.where_label(j.where)
 
 
 def job_embed(member, j, biome, scenes, c):
@@ -344,7 +344,10 @@ def job_embed(member, j, biome, scenes, c):
     nxt = logic.job_next(scenes)
     emb = discord.Embed(title=f"{j.name} - {j.title(rank)}",
                         description=j.remit, colour=0x7B3FE4)
-    emb.add_field(name="Where your Remit applies", value=where_text(j, biome), inline=False)
+    # A Job whose Remit works everywhere says nothing useful here, so the line is left off.
+    place = where_text(j, biome)
+    if place.strip().lower() != "anywhere":
+        emb.add_field(name="Where your Remit applies", value=place, inline=False)
     emb.add_field(name="Rank", value=f"{rank} of 3")
     emb.add_field(name="Witnessed Job scenes", value=str(scenes))
     emb.add_field(name="Next rank",
@@ -407,16 +410,14 @@ async def job_cmd(interaction: discord.Interaction, job: str = None, biome: str 
     if not j:
         return await interaction.response.send_message(
             f"There is no Job called **{job}**. Pick one from the list.", ephemeral=True)
-    if j.picks_biome and not biome:
-        return await interaction.response.send_message(
-            f"**{j.name}**'s Remit applies in one biome of your choice, so run it again with the "
-            f"biome as well: `/job job:{j.name} biome:Woods`. The biomes are "
-            + ", ".join(logic.BIOMES) + ".", ephemeral=True)
     if biome and not j.picks_biome:
         biome = ""
     if biome and biome not in logic.BIOMES:
         return await interaction.response.send_message(
             f"**{biome}** is not a biome. Pick one of " + ", ".join(logic.BIOMES) + ".", ephemeral=True)
+    # Keep a biome already chosen, so re-running /job for the same Job cannot wipe it.
+    if j.picks_biome and not biome and row and row["job"].lower() == j.name.lower():
+        biome = row["biome"] or ""
 
     was = row["job"] if row else None
     store.set_job(interaction.user.id, j.name, biome or "")
@@ -426,6 +427,11 @@ async def job_cmd(interaction: discord.Interaction, job: str = None, biome: str 
         note = f"You left **{was}**, and its scenes are kept for if you go back to it.\n"
     elif was == j.name:
         note = "That was already your Job.\n"
+    # Never block on the biome: it is a note on the card, not something the bot enforces.
+    if j.picks_biome and not biome:
+        note += (f"**{j.name}**'s Remit applies in one biome of your choice. Set it when you get a "
+                 f"moment with `/job job:{j.name} biome:Woods` - the biomes are "
+                 + ", ".join(logic.BIOMES) + ".\n")
     await interaction.response.send_message(
         note + f"Your Job is **{j.name}**.",
         embed=job_embed(interaction.user, j, biome or "", scenes, c), ephemeral=True)
